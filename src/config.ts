@@ -5,6 +5,7 @@ export interface GroupListener {
     channelId: string
     platform: string
     guildId?: string
+    reportChannelId?: string
     enabled: boolean
 }
 
@@ -13,6 +14,7 @@ const GroupListener: Schema<GroupListener> = Schema.object({
     selfId: Schema.string().required().description('机器人 ID'),
     channelId: Schema.string().required().description('频道 ID'),
     guildId: Schema.string().description('群组 ID'),
+    reportChannelId: Schema.string().description('定时分析报告接收群ID。留空则发送到被分析的群。'),
     enabled: Schema.boolean().default(true).description('是否在此频道启用监听')
 })
 
@@ -46,6 +48,8 @@ export interface Config {
     cronSchedule: string
     autoAnalysisCooldown: number
     cronAnalysisDays: number
+    cronAnalysisHours: number
+    cronAnalysisMinutes: number
     personaAnalysisMessageInterval: number
     personaCacheLifetimeDays: number
     personaLookbackDays: number
@@ -58,6 +62,8 @@ export interface Config {
     customPromptEnabled: boolean
     customPrompt: string
     customPromptDays: number
+    customPromptHours: number
+    customPromptMinutes: number
     theme: 'light' | 'dark' | 'auto'
     skin: string
 
@@ -87,8 +93,23 @@ export const Config: Schema<Config> = Schema.intersect([
                 '自动分析冷却时间（分钟）。冷却期间即使定时任务多次触发，也只会执行一次。'
             ),
         cronAnalysisDays: Schema.number()
-            .description('定时任务分析的默认天数。')
-            .default(1)
+            .description('分析时间窗口的天数（与小时、分钟合计计算）。')
+            .min(0)
+            .max(30)
+            .step(1)
+            .default(1),
+        cronAnalysisHours: Schema.number()
+            .description('分析时间窗口的小时数（与天数、分钟合计计算）。')
+            .min(0)
+            .max(23)
+            .step(1)
+            .default(0),
+        cronAnalysisMinutes: Schema.number()
+            .description('分析时间窗口的分钟数（与天数、小时合计计算）。')
+            .min(0)
+            .max(59)
+            .step(1)
+            .default(0)
     }).description('基础设置'),
     Schema.object({
         alwaysPersistMessages: Schema.boolean()
@@ -141,21 +162,33 @@ export const Config: Schema<Config> = Schema.intersect([
     Schema.object({
         customPromptEnabled: Schema.boolean()
             .description(
-                '启用后，群分析 主命令（含 -g/-c 指定目标群）将直接使用下方自定义提示词分析聊天记录：仅一次 LLM 调用，不使用内置话题/称号/金句/画像模板；自然语言查询参数将被忽略。'
+                '启用后，群分析主命令（格式：/群分析 [-g <分析群号>] [-c <频道号>] [-f] [查询内容]）直接使用下方自定义提示词分析聊天记录：仅一次 LLM 调用，不使用内置话题、称号、金句及画像模板；自然语言查询文字将被忽略。指定 -g/-c 只改变分析来源，结果仍返回发出指令的会话/群。'
             )
             .default(false),
         customPrompt: Schema.string()
             .role('textarea')
             .description(
-                '自定义提示词内容。聊天记录会附加在提示词之后一并发给 LLM，结果以纯文本分段发送到群里。'
+                '自定义提示词内容。聊天记录会附加在提示词之后发送给 LLM，结果以纯文本分段返回到发出指令的会话。'
             )
             .default(''),
         customPromptDays: Schema.number()
-            .description('使用自定义提示词分析的时间窗口（天）。')
-            .min(1)
-            .max(7)
+            .description('自定义提示词分析时间窗口的天数（与小时、分钟合计计算）。')
+            .min(0)
+            .max(30)
             .step(1)
-            .default(1)
+            .default(1),
+        customPromptHours: Schema.number()
+            .description('自定义提示词分析时间窗口的小时数（与天数、分钟合计计算）。')
+            .min(0)
+            .max(23)
+            .step(1)
+            .default(0),
+        customPromptMinutes: Schema.number()
+            .description('自定义提示词分析时间窗口的分钟数（与天数、小时合计计算）。')
+            .min(0)
+            .max(59)
+            .step(1)
+            .default(0)
     }).description('自定义提示词设置'),
     Schema.object({
         outputFormat: Schema.union([

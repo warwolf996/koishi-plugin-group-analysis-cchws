@@ -493,7 +493,9 @@ export class AnalysisService extends Service {
     private async _getGroupHistoryFromMessageService(
         selfId: string,
         target: AnalysisTarget,
-        days: number
+        days: number,
+        hours = 0,
+        minutes = 0
     ): Promise<StoredMessage[]> {
         const targetId = target.guildId || target.channelId
         if (!targetId) {
@@ -501,13 +503,23 @@ export class AnalysisService extends Service {
             return []
         }
 
-        this.ctx.logger.info(
-            `开始从消息服务获取群组 ${targetId} 近 ${days} 天的消息记录...`
-        )
-
-        const startTime = getStartTimeByDays(days)
-
         const endTime = new Date()
+        const durationMinutes = days * 24 * 60 + hours * 60 + minutes
+        const hasSubDayWindow = hours > 0 || minutes > 0
+        const startTime = hasSubDayWindow
+            ? new Date(endTime.getTime() - durationMinutes * 60 * 1000)
+            : getStartTimeByDays(days)
+        const durationText = [
+            days > 0 ? `${days} 天` : '',
+            hours > 0 ? `${hours} 小时` : '',
+            minutes > 0 ? `${minutes} 分钟` : ''
+        ]
+            .filter(Boolean)
+            .join(' ') || `${days} 天`
+
+        this.ctx.logger.info(
+            `开始从消息服务获取群组 ${targetId} 近 ${durationText}的消息记录...`
+        )
 
         const messages =
             await this.ctx.group_analysis_message.getHistoricalMessages(
@@ -597,7 +609,9 @@ export class AnalysisService extends Service {
 
     private resolveQueryTimeRange(
         intent: QueryIntent | null,
-        fallbackDays: number
+        fallbackDays: number,
+        fallbackHours = 0,
+        fallbackMinutes = 0
     ): { start: Date; end: Date; description?: string } {
         const now = new Date()
         let start: Date | undefined
@@ -614,7 +628,20 @@ export class AnalysisService extends Service {
         }
 
         if (!end) end = now
-        if (!start) start = getStartTimeByDays(fallbackDays)
+        if (!start) {
+            if (fallbackHours > 0 || fallbackMinutes > 0) {
+                start = new Date(
+                    now.getTime() -
+                        (fallbackDays * 24 * 60 +
+                            fallbackHours * 60 +
+                            fallbackMinutes) *
+                            60 *
+                            1000
+                )
+            } else {
+                start = getStartTimeByDays(fallbackDays)
+            }
+        }
 
         if (start > end) {
             const temp = start
@@ -634,12 +661,22 @@ export class AnalysisService extends Service {
         target: AnalysisTarget,
         days: number,
         outputFormat?: 'image' | 'pdf' | 'text',
-        force?: boolean
+        force?: boolean,
+        replySession?: Session,
+        deliveryTarget?: AnalysisTarget,
+        hours = 0,
+        minutes = 0
     ) {
         const bot = this._getBot(selfId)
-        const targetChannel = target.channelId ?? target.guildId
+        const sendTarget =
+            deliveryTarget?.channelId || deliveryTarget?.guildId
+                ? deliveryTarget
+                : target
+        const targetChannel = sendTarget.channelId ?? sendTarget.guildId
         const targetGuildContext =
-            target.channelId && target.guildId ? target.guildId : undefined
+            sendTarget.channelId && sendTarget.guildId
+                ? sendTarget.guildId
+                : undefined
 
         if (!targetChannel) {
             this.ctx.logger.warn('执行群分析需要提供 channelId 或 guildId。')
@@ -647,12 +684,24 @@ export class AnalysisService extends Service {
         }
 
         const sendStatus = async (content: string | h) =>
-            bot?.sendMessage(targetChannel, content, targetGuildContext)
+            replySession
+                ? replySession.send(content)
+                : bot?.sendMessage(targetChannel, content, targetGuildContext)
+
+        const durationMinutes = days * 24 * 60 + hours * 60 + minutes
+        if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+            await sendStatus('分析时间范围必须大于 0 分钟。')
+            return
+        }
 
         let message: h
 
         try {
-            const cacheKey = buildGroupAnalysisCacheKey(selfId, target, days)
+            const cacheKey = buildGroupAnalysisCacheKey(
+                selfId,
+                target,
+                days + hours / 24 + minutes / 1440
+            )
             const cached = this.groupAnalysisCache.get(cacheKey)
             const cacheExpired = isCacheExpiredByMinutes(
                 cached?.analyzedAt,
@@ -665,12 +714,21 @@ export class AnalysisService extends Service {
             if (!shouldRefresh && cached) {
                 analysisResult = cached.result
             } else {
-                await sendStatus(`开始分析群聊近 ${days} 天的活动，请稍候...`)
+                const windowText = [
+                    days > 0 ? `${days} 天` : '',
+                    hours > 0 ? `${hours} 小时` : '',
+                    minutes > 0 ? `${minutes} 分钟` : ''
+                ]
+                    .filter(Boolean)
+                    .join(' ') || `${days} 天`
+                await sendStatus(`开始分析群聊近 ${windowText}的活动，请稍候...`)
 
                 const messages = await this._getGroupHistoryFromMessageService(
                     selfId,
                     target,
-                    days
+                    days,
+                    hours,
+                    minutes
                 )
 
                 if (messages.length < this.config.minMessages) {
@@ -739,7 +797,11 @@ export class AnalysisService extends Service {
             )
         }
 
-        await bot?.sendMessage(targetChannel, message)
+        if (replySession) {
+            await replySession.send(message)
+        } else {
+            await bot?.sendMessage(targetChannel, message, targetGuildContext)
+        }
     }
 
     public async executeGroupQuery(
@@ -748,18 +810,14 @@ export class AnalysisService extends Service {
         query: string,
         outputFormat?: 'image' | 'pdf' | 'text'
     ) {
-        const bot = this._getBot(session.selfId)
         const targetChannel = target.channelId ?? target.guildId
-        const targetGuildContext =
-            target.channelId && target.guildId ? target.guildId : undefined
 
         if (!targetChannel) {
             this.ctx.logger.warn('执行群分析需要提供 channelId 或 guildId。')
             return
         }
 
-        const sendStatus = async (content: string | h) =>
-            bot?.sendMessage(targetChannel, content, targetGuildContext)
+        const sendStatus = async (content: string | h) => session.send(content)
 
         const currentTime = new Date()
         const timeZone =
@@ -791,7 +849,9 @@ export class AnalysisService extends Service {
         const action = this.normalizeQueryAction(intent.action)
         const timeRange = this.resolveQueryTimeRange(
             intent,
-            this.config.cronAnalysisDays || 1
+            this.config.cronAnalysisDays ?? 1,
+            this.config.cronAnalysisHours ?? 0,
+            this.config.cronAnalysisMinutes ?? 0
         )
 
         this.ctx.logger.info(
@@ -912,34 +972,52 @@ export class AnalysisService extends Service {
         session: Session,
         target: AnalysisTarget,
         prompt: string,
-        days: number
+        days: number,
+        hours = 0,
+        minutes = 0
     ) {
-        const bot = this._getBot(session.selfId)
         const targetChannel = target.channelId ?? target.guildId
-        const targetGuildContext =
-            target.channelId && target.guildId ? target.guildId : undefined
 
         if (!targetChannel) {
             this.ctx.logger.warn('执行自定义分析需要提供 channelId 或 guildId。')
             return
         }
 
-        const sendStatus = async (content: string | h) =>
-            bot?.sendMessage(targetChannel, content, targetGuildContext)
+        const sendStatus = async (content: string | h) => session.send(content)
+
+        const durationMinutes = Math.floor(
+            days * 24 * 60 + hours * 60 + minutes
+        )
+        if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+            await sendStatus('自定义提示词分析时间范围必须大于 0 分钟。')
+            return
+        }
+        const durationText = [
+            days > 0 ? `${days} 天` : '',
+            hours > 0 ? `${hours} 小时` : '',
+            minutes > 0 ? `${minutes} 分钟` : ''
+        ]
+            .filter(Boolean)
+            .join(' ') || `${durationMinutes} 分钟`
 
         this.ctx.logger.info(
-            `收到自定义提示词分析请求 (群: ${targetChannel}，范围: 近 ${days} 天): ${prompt}`
+            `收到自定义提示词分析请求 (群: ${targetChannel}，范围: 近 ${durationText})。`
         )
 
         try {
             await sendStatus(
-                `开始使用自定义提示词分析近 ${days} 天的聊天记录，请稍候...`
+                `开始使用自定义提示词分析近 ${durationText}的聊天记录，请稍候...`
             )
 
-            const messages = await this._getGroupHistoryFromMessageService(
+            const endTime = new Date()
+            const startTime = new Date(
+                endTime.getTime() - durationMinutes * 60 * 1000
+            )
+            const messages = await this._getGroupHistoryFromMessageServiceByTimeRange(
                 session.selfId,
                 target,
-                days
+                startTime,
+                endTime
             )
 
             if (messages.length < this.config.minMessages) {
@@ -1004,7 +1082,15 @@ export class AnalysisService extends Service {
                         await this.executeGroupAnalysis(
                             group.selfId,
                             { guildId: group.guildId, channelId: group.channelId },
-                            this.config.cronAnalysisDays
+                            this.config.cronAnalysisDays,
+                            undefined,
+                            false,
+                            undefined,
+                            group.reportChannelId
+                                ? { channelId: group.reportChannelId }
+                                : undefined,
+                            this.config.cronAnalysisHours ?? 0,
+                            this.config.cronAnalysisMinutes ?? 0
                         )
                     } catch (err) {
                         this.ctx.logger.error(

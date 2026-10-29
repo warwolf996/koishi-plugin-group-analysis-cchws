@@ -33,7 +33,8 @@ export function apply(ctx: Context, config: Config) {
             '本功能会分析本群的近期聊天记录，并生成一份报告。\n' +
                 '默认情况下，本功能会分析最近 1 天的聊天记录。\n' +
                 '也可以直接输入自然语言进行查询和对话。\n' +
-                '例如：/群分析 告诉我最近三小时都聊了什么'
+                '例如：/群分析 告诉我最近三小时都聊了什么。\n' +
+                '命令格式：/群分析 [-g <分析群号>] [-c <频道号>] [-f] [查询内容]。指定 -g/-c 只改变分析来源，状态和结果仍返回发出指令的会话/群。'
         )
         .alias('group-analysis')
 
@@ -89,7 +90,9 @@ export function apply(ctx: Context, config: Config) {
                             channelId: targetChannelId || undefined
                         },
                         customPrompt,
-                        config.customPromptDays || 1
+                        config.customPromptDays ?? 1,
+                        config.customPromptHours ?? 0,
+                        config.customPromptMinutes ?? 0
                     )
                 } else if (queryText) {
                     await ctx.group_analysis.executeGroupQuery(
@@ -101,8 +104,15 @@ export function apply(ctx: Context, config: Config) {
                         queryText
                     )
                 } else {
-                    const analysisDays = ctx.config?.cronAnalysisDays || 1
-                    if (analysisDays > 7)
+                    const analysisDays = ctx.config?.cronAnalysisDays ?? 1
+                    const analysisHours = ctx.config?.cronAnalysisHours ?? 0
+                    const analysisMinutes = ctx.config?.cronAnalysisMinutes ?? 0
+                    if (
+                        analysisDays +
+                            analysisHours / 24 +
+                            analysisMinutes / 1440 >
+                        7
+                    )
                         return '出于性能考虑，最多只能分析 7 天的数据。'
 
                     await ctx.group_analysis.executeGroupAnalysis(
@@ -113,7 +123,11 @@ export function apply(ctx: Context, config: Config) {
                         },
                         analysisDays,
                         undefined,
-                        options.force ?? false
+                        options.force ?? false,
+                        session,
+                        undefined,
+                        analysisHours,
+                        analysisMinutes
                     )
                 }
             } catch (err) {
